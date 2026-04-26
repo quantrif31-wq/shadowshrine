@@ -4,13 +4,19 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "concurrently \"vite\" \"node server.js\"",
     "build": "vite build",
     "preview": "vite preview",
     "start": "vite preview --host"
   },
   "dependencies": {
-    "vue": "^3.5.32"
+    "concurrently": "^9.2.1",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "multer": "^2.1.1",
+    "pinia": "^3.0.4",
+    "vue": "^3.5.32",
+    "vue-router": "^5.0.6"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.5",
