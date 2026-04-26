@@ -174,7 +174,7 @@ app.post('/api/playlists', (req, res) => {
 });
 
 // Catch-all route to serve index.html for SPA routing
-app.get('/*', (req, res) => {
+app.get('/:path*', (req, res) => {
   // Tránh bắt các request API hoặc Music
   if (req.url.startsWith('/api') || req.url.startsWith('/music')) {
     return res.status(404).json({ error: 'Not found' });
