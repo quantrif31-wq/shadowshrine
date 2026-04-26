@@ -9,7 +9,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
@@ -39,6 +39,12 @@ if (!fs.existsSync(playlistsFile)) {
 
 // Serve static music files
 app.use('/music', express.static(musicDir));
+
+// Serve frontend dist folder if it exists
+const distPath = path.join(__dirname, 'dist');
+if (fs.existsSync(distPath)) {
+  app.use(express.static(distPath));
+}
 
 // Multer storage config
 const storage = multer.diskStorage({
@@ -167,6 +173,15 @@ app.post('/api/playlists', (req, res) => {
   }
 });
 
+// Catch-all route to serve index.html for SPA routing
+if (fs.existsSync(distPath)) {
+  app.get('*', (req, res) => {
+    if (!req.url.startsWith('/api') && !req.url.startsWith('/music')) {
+      res.sendFile(path.join(distPath, 'index.html'));
+    }
+  });
+}
+
 app.listen(PORT, () => {
-  console.log(`Backend server running on http://localhost:${PORT}`);
+  console.log(`Backend server running on port ${PORT}`);
 });

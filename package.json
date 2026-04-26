@@ -7,7 +7,7 @@
     "dev": "concurrently \"vite\" \"node server.js\"",
     "build": "vite build",
     "preview": "vite preview",
-    "start": "vite preview --host"
+    "start": "node server.js"
   },
   "dependencies": {
     "concurrently": "^9.2.1",
