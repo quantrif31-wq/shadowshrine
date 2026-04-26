@@ -19,20 +19,22 @@ app.use((req, res, next) => {
   next();
 });
 
-// Create music directory if it doesn't exist
-const musicDir = path.join(__dirname, 'public', 'music');
+// Create data directory if it doesn't exist (outside of public/dist)
+const dataDir = path.join(__dirname, 'data');
+const musicDir = path.join(dataDir, 'music');
+
 if (!fs.existsSync(musicDir)) {
   fs.mkdirSync(musicDir, { recursive: true });
 }
 
 // Data file for songs
-const dataFile = path.join(musicDir, 'songs.json');
+const dataFile = path.join(dataDir, 'songs.json');
 if (!fs.existsSync(dataFile)) {
   fs.writeFileSync(dataFile, JSON.stringify([]));
 }
 
 // Data file for playlists
-const playlistsFile = path.join(musicDir, 'playlists.json');
+const playlistsFile = path.join(dataDir, 'playlists.json');
 if (!fs.existsSync(playlistsFile)) {
   fs.writeFileSync(playlistsFile, JSON.stringify([]));
 }
@@ -40,11 +42,9 @@ if (!fs.existsSync(playlistsFile)) {
 // Serve static music files
 app.use('/music', express.static(musicDir));
 
-// Serve frontend dist folder if it exists
+// Serve frontend dist folder
 const distPath = path.join(__dirname, 'dist');
-if (fs.existsSync(distPath)) {
-  app.use(express.static(distPath));
-}
+app.use(express.static(distPath));
 
 // Multer storage config
 const storage = multer.diskStorage({
@@ -174,13 +174,19 @@ app.post('/api/playlists', (req, res) => {
 });
 
 // Catch-all route to serve index.html for SPA routing
-if (fs.existsSync(distPath)) {
-  app.get('*', (req, res) => {
-    if (!req.url.startsWith('/api') && !req.url.startsWith('/music')) {
-      res.sendFile(path.join(distPath, 'index.html'));
-    }
-  });
-}
+app.get('*', (req, res) => {
+  // Tránh bắt các request API hoặc Music
+  if (req.url.startsWith('/api') || req.url.startsWith('/music')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  
+  const indexHtml = path.join(distPath, 'index.html');
+  if (fs.existsSync(indexHtml)) {
+    res.sendFile(indexHtml);
+  } else {
+    res.status(404).send('Frontend build (dist) not found. Please run "npm run build" first.');
+  }
+});
 
 app.listen(PORT, () => {
   console.log(`Backend server running on port ${PORT}`);
