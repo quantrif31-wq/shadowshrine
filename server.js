@@ -173,18 +173,18 @@ app.post('/api/playlists', (req, res) => {
   }
 });
 
-// Catch-all route to serve index.html for SPA routing
-app.get('/:path*', (req, res) => {
-  // Tránh bắt các request API hoặc Music
-  if (req.url.startsWith('/api') || req.url.startsWith('/music')) {
-    return res.status(404).json({ error: 'Not found' });
-  }
-  
-  const indexHtml = path.join(distPath, 'index.html');
-  if (fs.existsSync(indexHtml)) {
-    res.sendFile(indexHtml);
+// Catch-all middleware to serve index.html for SPA routing
+app.use((req, res) => {
+  // Chỉ xử lý các request GET không phải API hoặc Music
+  if (req.method === 'GET' && !req.url.startsWith('/api') && !req.url.startsWith('/music')) {
+    const indexHtml = path.join(distPath, 'index.html');
+    if (fs.existsSync(indexHtml)) {
+      res.sendFile(indexHtml);
+    } else {
+      res.status(404).send('Frontend build (dist) not found. Please run "npm run build" first.');
+    }
   } else {
-    res.status(404).send('Frontend build (dist) not found. Please run "npm run build" first.');
+    res.status(404).json({ error: 'Not found' });
   }
 });
 
