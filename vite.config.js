@@ -7,8 +7,7 @@ export default defineConfig({
   base: './',
   server: {
     proxy: {
-      '/api': 'http://localhost:3000',
-      '/music': 'http://localhost:3000'
+      '/api': 'http://localhost:3000'
     }
   },
   preview: {

@@ -1,12 +1,21 @@
+import 'dotenv/config';
 import express from 'express';
 import multer from 'multer';
 import cors from 'cors';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { v2 as cloudinary } from 'cloudinary';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// ─── Cloudinary Config ───
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -19,12 +28,10 @@ app.use((req, res, next) => {
   next();
 });
 
-// Create data directory if it doesn't exist (outside of public/dist)
+// ─── Data Directory (for JSON metadata only) ───
 const dataDir = path.join(__dirname, 'data');
-const musicDir = path.join(dataDir, 'music');
-
-if (!fs.existsSync(musicDir)) {
-  fs.mkdirSync(musicDir, { recursive: true });
+if (!fs.existsSync(dataDir)) {
+  fs.mkdirSync(dataDir, { recursive: true });
 }
 
 // Data file for songs
@@ -39,26 +46,35 @@ if (!fs.existsSync(playlistsFile)) {
   fs.writeFileSync(playlistsFile, JSON.stringify([]));
 }
 
-// Serve static music files
-app.use('/music', express.static(musicDir));
-
 // Serve frontend dist folder
 const distPath = path.join(__dirname, 'dist');
 app.use(express.static(distPath));
 
-// Multer storage config
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, musicDir);
-  },
-  filename: (req, file, cb) => {
-    cb(null, Date.now() + '-' + file.originalname);
-  }
-});
+// ─── Multer: Memory Storage (buffer, không ghi disk) ───
+const upload = multer({ storage: multer.memoryStorage() });
 
-const upload = multer({ storage });
+/**
+ * Upload a buffer to Cloudinary using upload_stream.
+ * resource_type: 'video' is required for audio files on Cloudinary.
+ */
+function uploadToCloudinary(buffer, options = {}) {
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        resource_type: 'video',
+        folder: 'shadowshrine',
+        ...options,
+      },
+      (error, result) => {
+        if (error) return reject(error);
+        resolve(result);
+      }
+    );
+    stream.end(buffer);
+  });
+}
 
-// API: Get all songs
+// ─── API: Get all songs ───
 app.get('/api/songs', (req, res) => {
   try {
     const data = JSON.parse(fs.readFileSync(dataFile, 'utf-8'));
@@ -68,8 +84,8 @@ app.get('/api/songs', (req, res) => {
   }
 });
 
-// API: Upload song
-app.post('/api/songs', upload.single('file'), (req, res) => {
+// ─── API: Upload song → Cloudinary ───
+app.post('/api/songs', upload.single('file'), async (req, res) => {
   try {
     const { title, author, note, theme, lyrics } = req.body;
     const file = req.file;
@@ -78,6 +94,15 @@ app.post('/api/songs', upload.single('file'), (req, res) => {
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
+    console.log(`Uploading "${file.originalname}" to Cloudinary...`);
+
+    // Upload buffer to Cloudinary
+    const result = await uploadToCloudinary(file.buffer, {
+      public_id: `${Date.now()}-${file.originalname.replace(/\.[^.]+$/, '')}`,
+    });
+
+    console.log(`Upload thành công: ${result.secure_url}`);
+
     const newSong = {
       id: Date.now().toString(),
       title: title || file.originalname,
@@ -85,8 +110,9 @@ app.post('/api/songs', upload.single('file'), (req, res) => {
       note: note || '',
       theme: theme || 'General',
       lyrics: lyrics || '',
-      url: `/music/${file.filename}`,
-      filename: file.filename,
+      url: result.secure_url,           // Cloudinary URL
+      cloudinary_id: result.public_id,  // Để xóa sau này nếu cần
+      filename: file.originalname,
       createdAt: new Date().toISOString()
     };
 
@@ -96,11 +122,12 @@ app.post('/api/songs', upload.single('file'), (req, res) => {
 
     res.status(201).json(newSong);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to upload song' });
+    console.error('Cloudinary upload error:', error);
+    res.status(500).json({ error: 'Failed to upload song to Cloudinary' });
   }
 });
-// API: Update song
+
+// ─── API: Update song metadata ───
 app.put('/api/songs/:id', (req, res) => {
   console.log(`Incoming PUT request for song ID: ${req.params.id}`);
   try {
@@ -126,12 +153,45 @@ app.put('/api/songs/:id', (req, res) => {
     console.log(`Successfully updated song ID: ${songId}`);
     res.json(songs[songIndex]);
   } catch (error) {
-    console.error(`Error updating song ID: ${songId}:`, error);
+    console.error(`Error updating song:`, error);
     res.status(500).json({ error: 'Failed to update song' });
   }
 });
 
-// API: Get all playlists
+// ─── API: Delete song (+ xóa file trên Cloudinary) ───
+app.delete('/api/songs/:id', async (req, res) => {
+  try {
+    const songId = req.params.id;
+    const songs = JSON.parse(fs.readFileSync(dataFile, 'utf-8'));
+    const songIndex = songs.findIndex(s => s.id === songId);
+
+    if (songIndex === -1) {
+      return res.status(404).json({ error: 'Song not found' });
+    }
+
+    const song = songs[songIndex];
+
+    // Xóa file trên Cloudinary nếu có cloudinary_id
+    if (song.cloudinary_id) {
+      try {
+        await cloudinary.uploader.destroy(song.cloudinary_id, { resource_type: 'video' });
+        console.log(`Deleted from Cloudinary: ${song.cloudinary_id}`);
+      } catch (cloudErr) {
+        console.error('Cloudinary delete error (non-fatal):', cloudErr);
+      }
+    }
+
+    songs.splice(songIndex, 1);
+    fs.writeFileSync(dataFile, JSON.stringify(songs, null, 2));
+
+    res.json({ message: 'Song deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting song:', error);
+    res.status(500).json({ error: 'Failed to delete song' });
+  }
+});
+
+// ─── API: Get all playlists ───
 app.get('/api/playlists', (req, res) => {
   try {
     const data = JSON.parse(fs.readFileSync(playlistsFile, 'utf-8'));
@@ -141,7 +201,7 @@ app.get('/api/playlists', (req, res) => {
   }
 });
 
-// API: Create or Update playlist
+// ─── API: Create or Update playlist ───
 app.post('/api/playlists', (req, res) => {
   try {
     const { id, name, songs } = req.body; // songs is an array of song IDs
@@ -175,8 +235,8 @@ app.post('/api/playlists', (req, res) => {
 
 // Catch-all middleware to serve index.html for SPA routing
 app.use((req, res) => {
-  // Chỉ xử lý các request GET không phải API hoặc Music
-  if (req.method === 'GET' && !req.url.startsWith('/api') && !req.url.startsWith('/music')) {
+  // Chỉ xử lý các request GET không phải API
+  if (req.method === 'GET' && !req.url.startsWith('/api')) {
     const indexHtml = path.join(distPath, 'index.html');
     if (fs.existsSync(indexHtml)) {
       res.sendFile(indexHtml);
@@ -190,4 +250,5 @@ app.use((req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Backend server running on port ${PORT}`);
+  console.log(`Cloudinary cloud: ${process.env.CLOUDINARY_CLOUD_NAME || '⚠️ NOT SET'}`);
 });

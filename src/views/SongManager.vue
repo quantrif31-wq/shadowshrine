@@ -17,6 +17,7 @@ const form = ref({
 
 const fileInput = ref(null)
 const isUploading = ref(false)
+const uploadProgress = ref(0)
 const uploadSuccess = ref(false)
 const errorMsg = ref('')
 
@@ -27,6 +28,7 @@ const handleUpload = async () => {
   }
 
   isUploading.value = true
+  uploadProgress.value = 0
   errorMsg.value = ''
   uploadSuccess.value = false
 
@@ -39,22 +41,49 @@ const handleUpload = async () => {
   formData.append('lyrics', form.value.lyrics)
 
   try {
-    const response = await fetch('/api/songs', {
-      method: 'POST',
-      body: formData
-    })
+    await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest()
+      
+      xhr.upload.addEventListener('progress', (e) => {
+        if (e.lengthComputable) {
+          // Upload chiếm 70% progress, 30% còn lại là Cloudinary xử lý
+          uploadProgress.value = Math.round((e.loaded / e.total) * 70)
+        }
+      })
 
-    if (response.ok) {
-      uploadSuccess.value = true
-      form.value = { title: '', author: '', theme: '', note: '', lyrics: '' }
-      fileInput.value.value = ''
-      await musicStore.fetchSongs()
-    } else {
-      const data = await response.json()
-      errorMsg.value = data.error || 'Upload thất bại'
-    }
+      xhr.addEventListener('load', async () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          uploadProgress.value = 100
+          uploadSuccess.value = true
+          form.value = { title: '', author: '', theme: '', note: '', lyrics: '' }
+          fileInput.value.value = ''
+          await musicStore.fetchSongs()
+          resolve()
+        } else {
+          try {
+            const data = JSON.parse(xhr.responseText)
+            errorMsg.value = data.error || 'Upload thất bại'
+          } catch {
+            errorMsg.value = 'Upload thất bại'
+          }
+          reject(new Error(errorMsg.value))
+        }
+      })
+
+      xhr.addEventListener('error', () => {
+        errorMsg.value = 'Lỗi kết nối tới server'
+        reject(new Error(errorMsg.value))
+      })
+
+      // Khi upload xong phần data, Cloudinary vẫn đang xử lý
+      xhr.upload.addEventListener('load', () => {
+        uploadProgress.value = 75
+      })
+
+      xhr.open('POST', '/api/songs')
+      xhr.send(formData)
+    })
   } catch (err) {
-    errorMsg.value = 'Lỗi kết nối tới server'
     console.error(err)
   } finally {
     isUploading.value = false
@@ -311,9 +340,20 @@ const fetchLyrics = async () => {
           ></textarea>
         </div>
 
+        <!-- Upload Progress Bar -->
+        <div v-if="isUploading" class="upload-progress">
+          <div class="progress-label">
+            <span>{{ uploadProgress < 75 ? 'Đang tải lên...' : 'Đang xử lý trên Cloudinary...' }}</span>
+            <span>{{ uploadProgress }}%</span>
+          </div>
+          <div class="progress-track">
+            <div class="progress-fill" :style="{ width: uploadProgress + '%' }"></div>
+          </div>
+        </div>
+
         <button type="submit" class="btn btn-primary" :disabled="isUploading">
-          <span v-if="isUploading">Đang tải lên...</span>
-          <span v-else>Tải lên bài hát</span>
+          <span v-if="isUploading">☁️ Đang tải lên Cloudinary... {{ uploadProgress }}%</span>
+          <span v-else>☁️ Tải lên Cloudinary</span>
         </button>
       </form>
     </div>
@@ -554,6 +594,35 @@ label {
   background: rgba(220, 38, 38, 0.1);
   border: 1px solid rgba(220, 38, 38, 0.3);
   color: #f87171;
+}
+
+/* Upload Progress Bar */
+.upload-progress {
+  margin-top: 0.5rem;
+}
+
+.progress-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.progress-track {
+  width: 100%;
+  height: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent-neon), var(--accent-purple));
+  border-radius: 4px;
+  transition: width 0.3s ease;
+  box-shadow: 0 0 10px rgba(0, 243, 255, 0.4);
 }
 
 button[type="submit"] {
