@@ -6,6 +6,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { v2 as cloudinary } from 'cloudinary';
+import { Readable } from 'stream';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -50,19 +51,26 @@ if (!fs.existsSync(playlistsFile)) {
 const distPath = path.join(__dirname, 'dist');
 app.use(express.static(distPath));
 
-// ─── Multer: Memory Storage (buffer, không ghi disk) ───
-const upload = multer({ storage: multer.memoryStorage() });
+// ─── Multer: Memory Storage với giới hạn 50MB ───
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 50 * 1024 * 1024, // 50MB max
+  },
+});
 
 /**
  * Upload a buffer to Cloudinary using upload_stream.
  * resource_type: 'video' is required for audio files on Cloudinary.
+ * Sử dụng stream pipe để xử lý file lớn ổn định hơn.
  */
 function uploadToCloudinary(buffer, options = {}) {
   return new Promise((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream(
+    const uploadStream = cloudinary.uploader.upload_stream(
       {
         resource_type: 'video',
         folder: 'shadowshrine',
+        timeout: 120000, // 2 phút timeout cho Cloudinary
         ...options,
       },
       (error, result) => {
@@ -70,8 +78,29 @@ function uploadToCloudinary(buffer, options = {}) {
         resolve(result);
       }
     );
-    stream.end(buffer);
+
+    // Dùng Readable stream pipe thay vì stream.end(buffer) để tránh lỗi với file lớn
+    const readableStream = new Readable();
+    readableStream.push(buffer);
+    readableStream.push(null);
+    readableStream.pipe(uploadStream);
   });
+}
+
+/**
+ * Tạo public_id an toàn: loại bỏ ký tự đặc biệt, dấu tiếng Việt
+ */
+function sanitizePublicId(originalname) {
+  const nameWithoutExt = originalname.replace(/\.[^.]+$/, '');
+  // Thay thế ký tự không phải alphanumeric bằng dấu gạch dưới
+  const sanitized = nameWithoutExt
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '') // Bỏ dấu tiếng Việt
+    .replace(/đ/gi, 'd')
+    .replace(/[^a-zA-Z0-9]/g, '_')  // Thay ký tự đặc biệt bằng _
+    .replace(/_+/g, '_')            // Gộp nhiều _ liên tiếp
+    .replace(/^_|_$/g, '');         // Bỏ _ đầu cuối
+  return `${Date.now()}_${sanitized || 'audio'}`;
 }
 
 // ─── API: Get all songs ───
@@ -86,6 +115,10 @@ app.get('/api/songs', (req, res) => {
 
 // ─── API: Upload song → Cloudinary ───
 app.post('/api/songs', upload.single('file'), async (req, res) => {
+  // Tăng timeout cho request upload (2 phút)
+  req.setTimeout(120000);
+  res.setTimeout(120000);
+
   try {
     const { title, author, note, theme, lyrics } = req.body;
     const file = req.file;
@@ -94,14 +127,17 @@ app.post('/api/songs', upload.single('file'), async (req, res) => {
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
-    console.log(`Uploading "${file.originalname}" to Cloudinary...`);
+    const fileSizeMB = (file.size / (1024 * 1024)).toFixed(2);
+    console.log(`Uploading "${file.originalname}" (${fileSizeMB}MB) to Cloudinary...`);
+
+    const publicId = sanitizePublicId(file.originalname);
 
     // Upload buffer to Cloudinary
     const result = await uploadToCloudinary(file.buffer, {
-      public_id: `${Date.now()}-${file.originalname.replace(/\.[^.]+$/, '')}`,
+      public_id: publicId,
     });
 
-    console.log(`Upload thành công: ${result.secure_url}`);
+    console.log(`✅ Upload thành công: ${result.secure_url}`);
 
     const newSong = {
       id: Date.now().toString(),
@@ -122,8 +158,14 @@ app.post('/api/songs', upload.single('file'), async (req, res) => {
 
     res.status(201).json(newSong);
   } catch (error) {
-    console.error('Cloudinary upload error:', error);
-    res.status(500).json({ error: 'Failed to upload song to Cloudinary' });
+    console.error('❌ Cloudinary upload error:', error);
+    
+    // Trả về error message rõ ràng hơn
+    let errorMsg = 'Failed to upload song to Cloudinary';
+    if (error.message) errorMsg += `: ${error.message}`;
+    if (error.http_code) errorMsg += ` (HTTP ${error.http_code})`;
+    
+    res.status(500).json({ error: errorMsg });
   }
 });
 
@@ -248,7 +290,11 @@ app.use((req, res) => {
   }
 });
 
-app.listen(PORT, () => {
+// ─── Tăng server timeout mặc định lên 2 phút ───
+const server = app.listen(PORT, () => {
   console.log(`Backend server running on port ${PORT}`);
   console.log(`Cloudinary cloud: ${process.env.CLOUDINARY_CLOUD_NAME || '⚠️ NOT SET'}`);
 });
+
+server.timeout = 120000;       // 2 phút
+server.keepAliveTimeout = 120000;

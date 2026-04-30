@@ -43,15 +43,36 @@ const handleUpload = async () => {
   try {
     await new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest()
+      let cloudinaryProcessing = null
       
+      // Timeout 2 phút (khớp với server)
+      xhr.timeout = 120000
+
       xhr.upload.addEventListener('progress', (e) => {
         if (e.lengthComputable) {
-          // Upload chiếm 70% progress, 30% còn lại là Cloudinary xử lý
+          // Upload data chiếm 0-70% progress
           uploadProgress.value = Math.round((e.loaded / e.total) * 70)
         }
       })
 
+      // Khi upload xong phần data → Cloudinary đang xử lý
+      xhr.upload.addEventListener('load', () => {
+        uploadProgress.value = 75
+        // Animate progress từ 75 → 95 trong khi chờ Cloudinary
+        let fakeProgress = 75
+        cloudinaryProcessing = setInterval(() => {
+          fakeProgress += 1
+          if (fakeProgress >= 95) {
+            clearInterval(cloudinaryProcessing)
+            cloudinaryProcessing = null
+          }
+          uploadProgress.value = fakeProgress
+        }, 500)
+      })
+
       xhr.addEventListener('load', async () => {
+        if (cloudinaryProcessing) clearInterval(cloudinaryProcessing)
+        
         if (xhr.status >= 200 && xhr.status < 300) {
           uploadProgress.value = 100
           uploadSuccess.value = true
@@ -71,13 +92,15 @@ const handleUpload = async () => {
       })
 
       xhr.addEventListener('error', () => {
-        errorMsg.value = 'Lỗi kết nối tới server'
+        if (cloudinaryProcessing) clearInterval(cloudinaryProcessing)
+        errorMsg.value = 'Lỗi kết nối tới server. Vui lòng thử lại.'
         reject(new Error(errorMsg.value))
       })
 
-      // Khi upload xong phần data, Cloudinary vẫn đang xử lý
-      xhr.upload.addEventListener('load', () => {
-        uploadProgress.value = 75
+      xhr.addEventListener('timeout', () => {
+        if (cloudinaryProcessing) clearInterval(cloudinaryProcessing)
+        errorMsg.value = 'Upload quá lâu (timeout). Vui lòng thử file nhỏ hơn hoặc thử lại.'
+        reject(new Error(errorMsg.value))
       })
 
       xhr.open('POST', '/api/songs')
