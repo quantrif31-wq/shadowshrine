@@ -46,7 +46,7 @@ const handleUpload = async () => {
       let cloudinaryProcessing = null
       
       // Timeout 2 phút (khớp với server)
-      xhr.timeout = 120000
+      xhr.timeout = 600000
 
       xhr.upload.addEventListener('progress', (e) => {
         if (e.lengthComputable) {
@@ -194,6 +194,7 @@ const editForm = ref({ title: '', author: '', theme: '', note: '', lyrics: '' })
 const editSuccess = ref('')
 const editError = ref('')
 const isUpdating = ref(false)
+const isDeleting = ref(false)
 const isFetchingLyrics = ref(false)
 
 const onEditSongChange = () => {
@@ -238,6 +239,34 @@ const updateSong = async () => {
     editError.value = 'Lỗi kết nối tới server'
   } finally {
     isUpdating.value = false
+  }
+}
+
+const deleteSong = async () => {
+  if (!selectedEditSongId.value) return
+  if (!confirm('Bạn chắc chắn muốn xóa bài hát này?')) return
+
+  isDeleting.value = true
+  editError.value = ''
+  editSuccess.value = ''
+
+  try {
+    const response = await fetch(`/api/songs/${selectedEditSongId.value}`, {
+      method: 'DELETE'
+    })
+
+    if (response.ok) {
+      editSuccess.value = 'Đã xóa bài hát thành công!'
+      selectedEditSongId.value = ''
+      editForm.value = { title: '', author: '', theme: '', note: '', lyrics: '' }
+      await musicStore.fetchSongs()
+    } else {
+      editError.value = 'Xóa bài hát thất bại'
+    }
+  } catch (err) {
+    editError.value = 'Lỗi kết nối tới server'
+  } finally {
+    isDeleting.value = false
   }
 }
 
@@ -435,9 +464,13 @@ const fetchLyrics = async () => {
           ></textarea>
         </div>
 
-        <button type="submit" class="btn btn-primary" :disabled="isUpdating">
+        <button type="submit" class="btn btn-primary" :disabled="isUpdating || isDeleting">
           <span v-if="isUpdating">Đang lưu...</span>
           <span v-else>Cập Nhật Thông Tin</span>
+        </button>
+        <button type="button" class="btn btn-danger" :disabled="isUpdating || isDeleting" @click="deleteSong">
+          <span v-if="isDeleting">Đang xóa...</span>
+          <span v-else>Xóa Bài Hát</span>
         </button>
       </form>
     </div>
@@ -788,6 +821,16 @@ button[type="submit"] {
 .btn-auto-lyric:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+.btn-danger {
+  background: #b91c1c;
+  border: 1px solid #ef4444;
+  color: #fff;
+}
+
+.btn-danger:hover {
+  background: #991b1b;
 }
 
 @media (max-width: 600px) {

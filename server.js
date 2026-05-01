@@ -1,4 +1,4 @@
-import 'dotenv/config';
+﻿import 'dotenv/config';
 import express from 'express';
 import multer from 'multer';
 import cors from 'cors';
@@ -7,11 +7,13 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { v2 as cloudinary } from 'cloudinary';
 import { Readable } from 'stream';
+import pg from 'pg';
+
+const { Pool } = pg;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// ─── Cloudinary Config ───
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
@@ -29,48 +31,104 @@ app.use((req, res, next) => {
   next();
 });
 
-// ─── Data Directory (for JSON metadata only) ───
-const dataDir = path.join(__dirname, 'data');
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
-}
-
-// Data file for songs
-const dataFile = path.join(dataDir, 'songs.json');
-if (!fs.existsSync(dataFile)) {
-  fs.writeFileSync(dataFile, JSON.stringify([]));
-}
-
-// Data file for playlists
-const playlistsFile = path.join(dataDir, 'playlists.json');
-if (!fs.existsSync(playlistsFile)) {
-  fs.writeFileSync(playlistsFile, JSON.stringify([]));
-}
-
-// Serve frontend dist folder
 const distPath = path.join(__dirname, 'dist');
 app.use(express.static(distPath));
 
-// ─── Multer: Memory Storage với giới hạn 50MB ───
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 50 * 1024 * 1024, // 50MB max
+    fileSize: 50 * 1024 * 1024,
   },
 });
 
-/**
- * Upload a buffer to Cloudinary using upload_stream.
- * resource_type: 'video' is required for audio files on Cloudinary.
- * Sử dụng stream pipe để xử lý file lớn ổn định hơn.
- */
+function normalizePostgresUrl(rawUrl) {
+  if (!rawUrl) return rawUrl;
+
+  try {
+    new URL(rawUrl);
+    return rawUrl;
+  } catch {
+    const scheme = 'postgresql://';
+    if (!rawUrl.startsWith(scheme)) {
+      throw new Error('DATABASE_URL is invalid and does not start with postgresql://');
+    }
+
+    const tail = rawUrl.slice(scheme.length);
+    const atIndex = tail.lastIndexOf('@');
+    if (atIndex === -1) {
+      throw new Error('DATABASE_URL is invalid and missing host section.');
+    }
+
+    const authPart = tail.slice(0, atIndex);
+    const hostAndDb = tail.slice(atIndex + 1);
+    const slashAfterHost = hostAndDb.indexOf('/');
+    if (slashAfterHost === -1) {
+      throw new Error('DATABASE_URL is invalid and missing database name.');
+    }
+
+    const hostPart = hostAndDb.slice(0, slashAfterHost);
+    const dbPath = hostAndDb.slice(slashAfterHost);
+    const colonIndex = authPart.indexOf(':');
+    if (colonIndex === -1) {
+      throw new Error('DATABASE_URL is invalid and missing password section.');
+    }
+
+    const username = authPart.slice(0, colonIndex);
+    const passwordRaw = authPart.slice(colonIndex + 1);
+    const encodedPassword = encodeURIComponent(passwordRaw);
+
+    return `${scheme}${username}:${encodedPassword}@${hostPart}${dbPath}`;
+  }
+}
+
+const databaseUrl = normalizePostgresUrl(
+  process.env.SUPABASE_DATABASE_URL || process.env.DATABASE_URL
+);
+
+if (!databaseUrl) {
+  throw new Error('Missing SUPABASE_DATABASE_URL or DATABASE_URL in environment variables.');
+}
+
+const pool = new Pool({
+  connectionString: databaseUrl,
+  ssl: databaseUrl.includes('supabase.com')
+    ? { rejectUnauthorized: false }
+    : false,
+});
+
+async function ensureSchema() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS songs (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      author TEXT NOT NULL,
+      note TEXT NOT NULL DEFAULT '',
+      theme TEXT NOT NULL DEFAULT 'General',
+      lyrics TEXT NOT NULL DEFAULT '',
+      url TEXT NOT NULL,
+      cloudinary_id TEXT,
+      filename TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS playlists (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      songs JSONB NOT NULL DEFAULT '[]'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+}
+
 function uploadToCloudinary(buffer, options = {}) {
   return new Promise((resolve, reject) => {
     const uploadStream = cloudinary.uploader.upload_stream(
       {
         resource_type: 'video',
         folder: 'shadowshrine',
-        timeout: 120000, // 2 phút timeout cho Cloudinary
+        timeout: 600000,
         ...options,
       },
       (error, result) => {
@@ -79,7 +137,6 @@ function uploadToCloudinary(buffer, options = {}) {
       }
     );
 
-    // Dùng Readable stream pipe thay vì stream.end(buffer) để tránh lỗi với file lớn
     const readableStream = new Readable();
     readableStream.push(buffer);
     readableStream.push(null);
@@ -87,37 +144,55 @@ function uploadToCloudinary(buffer, options = {}) {
   });
 }
 
-/**
- * Tạo public_id an toàn: loại bỏ ký tự đặc biệt, dấu tiếng Việt
- */
 function sanitizePublicId(originalname) {
   const nameWithoutExt = originalname.replace(/\.[^.]+$/, '');
-  // Thay thế ký tự không phải alphanumeric bằng dấu gạch dưới
   const sanitized = nameWithoutExt
     .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '') // Bỏ dấu tiếng Việt
+    .replace(/[\u0300-\u036f]/g, '')
     .replace(/đ/gi, 'd')
-    .replace(/[^a-zA-Z0-9]/g, '_')  // Thay ký tự đặc biệt bằng _
-    .replace(/_+/g, '_')            // Gộp nhiều _ liên tiếp
-    .replace(/^_|_$/g, '');         // Bỏ _ đầu cuối
+    .replace(/[^a-zA-Z0-9]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_|_$/g, '');
   return `${Date.now()}_${sanitized || 'audio'}`;
 }
 
-// ─── API: Get all songs ───
-app.get('/api/songs', (req, res) => {
+function mapSongRow(row) {
+  return {
+    id: row.id,
+    title: row.title,
+    author: row.author,
+    note: row.note,
+    theme: row.theme,
+    lyrics: row.lyrics,
+    url: row.url,
+    cloudinary_id: row.cloudinary_id,
+    filename: row.filename,
+    createdAt: row.created_at,
+  };
+}
+
+function mapPlaylistRow(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    songs: Array.isArray(row.songs) ? row.songs : [],
+    createdAt: row.created_at,
+  };
+}
+
+app.get('/api/songs', async (req, res) => {
   try {
-    const data = JSON.parse(fs.readFileSync(dataFile, 'utf-8'));
-    res.json(data);
+    const result = await pool.query('SELECT * FROM songs ORDER BY created_at DESC');
+    res.json(result.rows.map(mapSongRow));
   } catch (error) {
+    console.error('Failed to read songs:', error);
     res.status(500).json({ error: 'Failed to read songs data' });
   }
 });
 
-// ─── API: Upload song → Cloudinary ───
 app.post('/api/songs', upload.single('file'), async (req, res) => {
-  // Tăng timeout cho request upload (2 phút)
-  req.setTimeout(120000);
-  res.setTimeout(120000);
+  req.setTimeout(600000);
+  res.setTimeout(600000);
 
   try {
     const { title, author, note, theme, lyrics } = req.body;
@@ -131,13 +206,7 @@ app.post('/api/songs', upload.single('file'), async (req, res) => {
     console.log(`Uploading "${file.originalname}" (${fileSizeMB}MB) to Cloudinary...`);
 
     const publicId = sanitizePublicId(file.originalname);
-
-    // Upload buffer to Cloudinary
-    const result = await uploadToCloudinary(file.buffer, {
-      public_id: publicId,
-    });
-
-    console.log(`✅ Upload thành công: ${result.secure_url}`);
+    const cloud = await uploadToCloudinary(file.buffer, { public_id: publicId });
 
     const newSong = {
       id: Date.now().toString(),
@@ -146,74 +215,82 @@ app.post('/api/songs', upload.single('file'), async (req, res) => {
       note: note || '',
       theme: theme || 'General',
       lyrics: lyrics || '',
-      url: result.secure_url,           // Cloudinary URL
-      cloudinary_id: result.public_id,  // Để xóa sau này nếu cần
+      url: cloud.secure_url,
+      cloudinary_id: cloud.public_id,
       filename: file.originalname,
-      createdAt: new Date().toISOString()
     };
 
-    const songs = JSON.parse(fs.readFileSync(dataFile, 'utf-8'));
-    songs.push(newSong);
-    fs.writeFileSync(dataFile, JSON.stringify(songs, null, 2));
+    await pool.query(
+      `INSERT INTO songs (id, title, author, note, theme, lyrics, url, cloudinary_id, filename)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      [
+        newSong.id,
+        newSong.title,
+        newSong.author,
+        newSong.note,
+        newSong.theme,
+        newSong.lyrics,
+        newSong.url,
+        newSong.cloudinary_id,
+        newSong.filename,
+      ]
+    );
 
-    res.status(201).json(newSong);
+    const created = await pool.query('SELECT * FROM songs WHERE id = $1', [newSong.id]);
+    res.status(201).json(mapSongRow(created.rows[0]));
   } catch (error) {
-    console.error('❌ Cloudinary upload error:', error);
-    
-    // Trả về error message rõ ràng hơn
+    console.error('Cloudinary upload error:', error);
     let errorMsg = 'Failed to upload song to Cloudinary';
     if (error.message) errorMsg += `: ${error.message}`;
     if (error.http_code) errorMsg += ` (HTTP ${error.http_code})`;
-    
     res.status(500).json({ error: errorMsg });
   }
 });
 
-// ─── API: Update song metadata ───
-app.put('/api/songs/:id', (req, res) => {
-  console.log(`Incoming PUT request for song ID: ${req.params.id}`);
+app.put('/api/songs/:id', async (req, res) => {
   try {
     const { title, author, note, theme, lyrics } = req.body;
     const songId = req.params.id;
 
-    const songs = JSON.parse(fs.readFileSync(dataFile, 'utf-8'));
-    console.log(`Searching for ID: "${songId}". Available IDs: ${songs.map(s => `"${s.id}"`).join(', ')}`);
-    const songIndex = songs.findIndex(s => s.id === songId);
-
-    if (songIndex === -1) {
+    const existing = await pool.query('SELECT * FROM songs WHERE id = $1', [songId]);
+    if (existing.rowCount === 0) {
       return res.status(404).json({ error: 'Song not found' });
     }
 
-    // Update only provided fields
-    if (title !== undefined) songs[songIndex].title = title;
-    if (author !== undefined) songs[songIndex].author = author;
-    if (note !== undefined) songs[songIndex].note = note;
-    if (theme !== undefined) songs[songIndex].theme = theme;
-    if (lyrics !== undefined) songs[songIndex].lyrics = lyrics;
+    const current = existing.rows[0];
+    const updated = await pool.query(
+      `UPDATE songs
+       SET title = $1, author = $2, note = $3, theme = $4, lyrics = $5
+       WHERE id = $6
+       RETURNING *`,
+      [
+        title ?? current.title,
+        author ?? current.author,
+        note ?? current.note,
+        theme ?? current.theme,
+        lyrics ?? current.lyrics,
+        songId,
+      ]
+    );
 
-    fs.writeFileSync(dataFile, JSON.stringify(songs, null, 2));
-    console.log(`Successfully updated song ID: ${songId}`);
-    res.json(songs[songIndex]);
+    res.json(mapSongRow(updated.rows[0]));
   } catch (error) {
-    console.error(`Error updating song:`, error);
+    console.error('Error updating song:', error);
     res.status(500).json({ error: 'Failed to update song' });
   }
 });
 
-// ─── API: Delete song (+ xóa file trên Cloudinary) ───
 app.delete('/api/songs/:id', async (req, res) => {
   try {
     const songId = req.params.id;
-    const songs = JSON.parse(fs.readFileSync(dataFile, 'utf-8'));
-    const songIndex = songs.findIndex(s => s.id === songId);
+    const existing = await pool.query('SELECT * FROM songs WHERE id = $1', [songId]);
 
-    if (songIndex === -1) {
+    if (existing.rowCount === 0) {
       return res.status(404).json({ error: 'Song not found' });
     }
 
-    const song = songs[songIndex];
+    const song = existing.rows[0];
 
-    // Xóa file trên Cloudinary nếu có cloudinary_id
     if (song.cloudinary_id) {
       try {
         await cloudinary.uploader.destroy(song.cloudinary_id, { resource_type: 'video' });
@@ -223,8 +300,17 @@ app.delete('/api/songs/:id', async (req, res) => {
       }
     }
 
-    songs.splice(songIndex, 1);
-    fs.writeFileSync(dataFile, JSON.stringify(songs, null, 2));
+    await pool.query('DELETE FROM songs WHERE id = $1', [songId]);
+    await pool.query(
+      `UPDATE playlists
+       SET songs = COALESCE((
+         SELECT jsonb_agg(song_id)
+         FROM jsonb_array_elements_text(playlists.songs) AS song_id
+         WHERE song_id <> $1
+       ), '[]'::jsonb)
+       WHERE songs ? $1`,
+      [songId]
+    );
 
     res.json({ message: 'Song deleted successfully' });
   } catch (error) {
@@ -233,51 +319,51 @@ app.delete('/api/songs/:id', async (req, res) => {
   }
 });
 
-// ─── API: Get all playlists ───
-app.get('/api/playlists', (req, res) => {
+app.get('/api/playlists', async (req, res) => {
   try {
-    const data = JSON.parse(fs.readFileSync(playlistsFile, 'utf-8'));
-    res.json(data);
+    const result = await pool.query('SELECT * FROM playlists ORDER BY created_at DESC');
+    res.json(result.rows.map(mapPlaylistRow));
   } catch (error) {
+    console.error('Failed to read playlists:', error);
     res.status(500).json({ error: 'Failed to read playlists data' });
   }
 });
 
-// ─── API: Create or Update playlist ───
-app.post('/api/playlists', (req, res) => {
+app.post('/api/playlists', async (req, res) => {
   try {
-    const { id, name, songs } = req.body; // songs is an array of song IDs
-    const playlists = JSON.parse(fs.readFileSync(playlistsFile, 'utf-8'));
-    
+    const { id, name, songs } = req.body;
+
     if (id) {
-      // Update
-      const index = playlists.findIndex(p => p.id === id);
-      if (index !== -1) {
-        playlists[index] = { ...playlists[index], name, songs: songs || playlists[index].songs };
-        fs.writeFileSync(playlistsFile, JSON.stringify(playlists, null, 2));
-        return res.json(playlists[index]);
+      const updated = await pool.query(
+        `UPDATE playlists
+         SET name = $1,
+             songs = $2::jsonb
+         WHERE id = $3
+         RETURNING *`,
+        [name || 'New Playlist', JSON.stringify(songs || []), id]
+      );
+
+      if (updated.rowCount > 0) {
+        return res.json(mapPlaylistRow(updated.rows[0]));
       }
     }
-    
-    // Create new
-    const newPlaylist = {
-      id: Date.now().toString(),
-      name: name || 'New Playlist',
-      songs: songs || [],
-      createdAt: new Date().toISOString()
-    };
-    playlists.push(newPlaylist);
-    fs.writeFileSync(playlistsFile, JSON.stringify(playlists, null, 2));
-    res.status(201).json(newPlaylist);
+
+    const newId = Date.now().toString();
+    const created = await pool.query(
+      `INSERT INTO playlists (id, name, songs)
+       VALUES ($1,$2,$3::jsonb)
+       RETURNING *`,
+      [newId, name || 'New Playlist', JSON.stringify(songs || [])]
+    );
+
+    res.status(201).json(mapPlaylistRow(created.rows[0]));
   } catch (error) {
-    console.error(error);
+    console.error('Failed to save playlist:', error);
     res.status(500).json({ error: 'Failed to save playlist' });
   }
 });
 
-// Catch-all middleware to serve index.html for SPA routing
 app.use((req, res) => {
-  // Chỉ xử lý các request GET không phải API
   if (req.method === 'GET' && !req.url.startsWith('/api')) {
     const indexHtml = path.join(distPath, 'index.html');
     if (fs.existsSync(indexHtml)) {
@@ -290,11 +376,19 @@ app.use((req, res) => {
   }
 });
 
-// ─── Tăng server timeout mặc định lên 2 phút ───
-const server = app.listen(PORT, () => {
-  console.log(`Backend server running on port ${PORT}`);
-  console.log(`Cloudinary cloud: ${process.env.CLOUDINARY_CLOUD_NAME || '⚠️ NOT SET'}`);
-});
+async function start() {
+  await ensureSchema();
 
-server.timeout = 120000;       // 2 phút
-server.keepAliveTimeout = 120000;
+  const server = app.listen(PORT, () => {
+    console.log(`Backend server running on port ${PORT}`);
+    console.log(`Cloudinary cloud: ${process.env.CLOUDINARY_CLOUD_NAME || 'NOT SET'}`);
+  });
+
+  server.timeout = 600000;
+  server.keepAliveTimeout = 120000;
+}
+
+start().catch((error) => {
+  console.error('Failed to initialize server:', error);
+  process.exit(1);
+});
