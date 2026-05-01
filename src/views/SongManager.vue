@@ -42,69 +42,83 @@ const handleUpload = async () => {
 
   try {
     await new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest()
-      let cloudinaryProcessing = null
-      
-      // Timeout 2 phút (khớp với server)
-      xhr.timeout = 600000
+      const file = fileInput.value.files[0]
 
-      xhr.upload.addEventListener('progress', (e) => {
-        if (e.lengthComputable) {
-          // Upload data chiếm 0-70% progress
-          uploadProgress.value = Math.round((e.loaded / e.total) * 70)
-        }
-      })
+      fetch(`/api/upload-signature?filename=${encodeURIComponent(file.name)}`)
+        .then(r => r.json())
+        .then(signatureData => {
+          const cloudForm = new FormData()
+          cloudForm.append('file', file)
+          cloudForm.append('api_key', signatureData.apiKey)
+          cloudForm.append('timestamp', String(signatureData.timestamp))
+          cloudForm.append('signature', signatureData.signature)
+          cloudForm.append('folder', signatureData.folder)
+          cloudForm.append('public_id', signatureData.publicId)
+          const xhr = new XMLHttpRequest()
+          xhr.timeout = 600000
 
-      // Khi upload xong phần data → Cloudinary đang xử lý
-      xhr.upload.addEventListener('load', () => {
-        uploadProgress.value = 75
-        // Animate progress từ 75 → 95 trong khi chờ Cloudinary
-        let fakeProgress = 75
-        cloudinaryProcessing = setInterval(() => {
-          fakeProgress += 1
-          if (fakeProgress >= 95) {
-            clearInterval(cloudinaryProcessing)
-            cloudinaryProcessing = null
-          }
-          uploadProgress.value = fakeProgress
-        }, 500)
-      })
+          xhr.upload.addEventListener('progress', (e) => {
+            if (e.lengthComputable) {
+              uploadProgress.value = Math.round((e.loaded / e.total) * 90)
+            }
+          })
 
-      xhr.addEventListener('load', async () => {
-        if (cloudinaryProcessing) clearInterval(cloudinaryProcessing)
-        
-        if (xhr.status >= 200 && xhr.status < 300) {
-          uploadProgress.value = 100
-          uploadSuccess.value = true
-          form.value = { title: '', author: '', theme: '', note: '', lyrics: '' }
-          fileInput.value.value = ''
-          await musicStore.fetchSongs()
-          resolve()
-        } else {
-          try {
-            const data = JSON.parse(xhr.responseText)
-            errorMsg.value = data.error || 'Upload thất bại'
-          } catch {
-            errorMsg.value = 'Upload thất bại'
-          }
-          reject(new Error(errorMsg.value))
-        }
-      })
+          xhr.addEventListener('load', async () => {
+            if (xhr.status < 200 || xhr.status >= 300) {
+              errorMsg.value = 'Upload file lên Cloudinary thất bại'
+              reject(new Error(errorMsg.value))
+              return
+            }
 
-      xhr.addEventListener('error', () => {
-        if (cloudinaryProcessing) clearInterval(cloudinaryProcessing)
-        errorMsg.value = 'Lỗi kết nối tới server. Vui lòng thử lại.'
-        reject(new Error(errorMsg.value))
-      })
+            const cloud = JSON.parse(xhr.responseText)
+            uploadProgress.value = 95
 
-      xhr.addEventListener('timeout', () => {
-        if (cloudinaryProcessing) clearInterval(cloudinaryProcessing)
-        errorMsg.value = 'Upload quá lâu (timeout). Vui lòng thử file nhỏ hơn hoặc thử lại.'
-        reject(new Error(errorMsg.value))
-      })
+            const saveRes = await fetch('/api/songs/metadata', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                title: form.value.title,
+                author: form.value.author,
+                theme: form.value.theme,
+                note: form.value.note,
+                lyrics: form.value.lyrics,
+                url: cloud.secure_url,
+                cloudinary_id: cloud.public_id,
+                filename: file.name
+              })
+            })
 
-      xhr.open('POST', '/api/songs')
-      xhr.send(formData)
+            if (!saveRes.ok) {
+              errorMsg.value = 'Lưu metadata bài hát thất bại'
+              reject(new Error(errorMsg.value))
+              return
+            }
+
+            uploadProgress.value = 100
+            uploadSuccess.value = true
+            form.value = { title: '', author: '', theme: '', note: '', lyrics: '' }
+            fileInput.value.value = ''
+            await musicStore.fetchSongs()
+            resolve()
+          })
+
+          xhr.addEventListener('error', () => {
+            errorMsg.value = 'Lỗi kết nối khi upload lên Cloudinary'
+            reject(new Error(errorMsg.value))
+          })
+
+          xhr.addEventListener('timeout', () => {
+            errorMsg.value = 'Upload quá lâu (timeout). Vui lòng thử lại.'
+            reject(new Error(errorMsg.value))
+          })
+
+          xhr.open('POST', signatureData.uploadUrl)
+          xhr.send(cloudForm)
+        })
+        .catch((e) => {
+          errorMsg.value = 'Không lấy được chữ ký upload từ server'
+          reject(e)
+        })
     })
   } catch (err) {
     console.error(err)
